@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/big"
 	"os"
 	"sync"
 	"time"
@@ -12,61 +13,63 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Calculator interface defines the VWAP operations
 type Calculator interface {
-	Update(price, size float64) error
-	Calculate() float64
+	Update(price, size string) error
+	Calculate() string
 }
 
 const (
-	windowSize    = 200
-	websocketURL  = "wss://ws-feed.exchange.coinbase.com"
-	retryDelay    = 3 * time.Second
-	maxRetries    = 5
+	windowSize   = 200
+	websocketURL = "wss://ws-feed.exchange.coinbase.com"
+	retryDelay   = 3 * time.Second
+	maxRetries   = 5
 )
 
 type Trade struct {
-	Type      string  `json:"type"`
-	ProductID string  `json:"product_id"`
-	Price     float64 `json:"price,string"`
-	Size      float64 `json:"size,string"`
+	Type      string `json:"type"`
+	ProductID string `json:"product_id"`
+	Price     string `json:"price"`
+	Size      string `json:"size"`
 }
 
 type RingBuffer struct {
-	data  [windowSize * 2]float64
+	data  [windowSize * 2]big.Rat
 	start int
 	count int
 }
 
-func (rb *RingBuffer) Add(price, size float64) (oldPrice, oldSize float64, removed bool) {
+func (rb *RingBuffer) Add(price, size *big.Rat) (oldPrice, oldSize *big.Rat, removed bool) {
 	if rb.count == windowSize {
-		oldPrice = rb.data[rb.start]
-		oldSize = rb.data[rb.start+1]
+		oldPrice = new(big.Rat).Set(&rb.data[rb.start])
+		oldSize = new(big.Rat).Set(&rb.data[rb.start+1])
 		rb.start = (rb.start + 2) % len(rb.data)
 		removed = true
 	} else {
 		rb.count++
 	}
 	pos := (rb.start + (rb.count-1)*2) % len(rb.data)
-	rb.data[pos] = price
-	rb.data[pos+1] = size
+	rb.data[pos].Set(price)
+	rb.data[pos+1].Set(size)
 	return
 }
 
 type VWAPCalculator struct {
 	mu          sync.Mutex
 	buffer      RingBuffer
-	totalPV     float64
-	totalVolume float64
+	totalPV     big.Rat
+	totalVolume big.Rat
 }
 
 func NewVWAPCalculator() *VWAPCalculator {
 	return &VWAPCalculator{}
 }
 
-func (v *VWAPCalculator) Update(price, size float64) error {
-	if price <= 0 || size <= 0 {
-		return errors.New("invalid trade data: price and size must be positive")
+func (v *VWAPCalculator) Update(priceStr, sizeStr string) error {
+	price, ok1 := new(big.Rat).SetString(priceStr)
+	size, ok2 := new(big.Rat).SetString(sizeStr)
+
+	if !ok1 || !ok2 || price.Cmp(big.NewRat(0, 1)) <= 0 || size.Cmp(big.NewRat(0, 1)) <= 0 {
+		return errors.New("invalid trade data: price and size must be positive rational numbers")
 	}
 
 	v.mu.Lock()
@@ -74,22 +77,23 @@ func (v *VWAPCalculator) Update(price, size float64) error {
 
 	oldPrice, oldSize, removed := v.buffer.Add(price, size)
 	if removed {
-		v.totalPV -= oldPrice * oldSize
-		v.totalVolume -= oldSize
+		v.totalPV.Sub(&v.totalPV, new(big.Rat).Mul(oldPrice, oldSize))
+		v.totalVolume.Sub(&v.totalVolume, oldSize)
 	}
-	v.totalPV += price * size
-	v.totalVolume += size
+	v.totalPV.Add(&v.totalPV, new(big.Rat).Mul(price, size))
+	v.totalVolume.Add(&v.totalVolume, size)
 	return nil
 }
 
-func (v *VWAPCalculator) Calculate() float64 {
+func (v *VWAPCalculator) Calculate() string {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	if v.totalVolume == 0 {
-		return 0
+	if v.totalVolume.Cmp(big.NewRat(0, 1)) == 0 {
+		return "0"
 	}
-	return v.totalPV / v.totalVolume
+	vwap := new(big.Rat).Quo(&v.totalPV, &v.totalVolume)
+	return vwap.FloatString(4) // Convert to decimal with 4 decimal places
 }
 
 // Logger interface for dependency injection
@@ -163,7 +167,7 @@ func handleConnection(conn *websocket.Conn, calculators map[string]Calculator, l
 	messageChan := make(chan []byte)
 	errChan := make(chan error)
 
-	go readMessages(conn, messageChan, errChan, logger)
+	go readMessages(conn, messageChan, errChan)
 
 	for {
 		select {
@@ -175,7 +179,7 @@ func handleConnection(conn *websocket.Conn, calculators map[string]Calculator, l
 	}
 }
 
-func readMessages(conn *websocket.Conn, messageChan chan<- []byte, errChan chan<- error, logger Logger) {
+func readMessages(conn *websocket.Conn, messageChan chan<- []byte, errChan chan<- error) {
 	defer close(messageChan)
 	defer close(errChan)
 
@@ -200,8 +204,7 @@ func processMessage(message []byte, calculators map[string]Calculator, logger Lo
 		return
 	}
 
-	logger.Infof("Received trade: %s %.4f @ %.2f", 
-		trade.ProductID, trade.Size, trade.Price)
+	logger.Infof("Received trade: %s %s @ %s", trade.ProductID, trade.Size, trade.Price)
 
 	calculator, exists := calculators[trade.ProductID]
 	if !exists {
@@ -215,7 +218,7 @@ func processMessage(message []byte, calculators map[string]Calculator, logger Lo
 	}
 
 	vwap := calculator.Calculate()
-	fmt.Printf("%s VWAP: %.4f\n", trade.ProductID, vwap)
+	fmt.Printf("%s VWAP: %s\n", trade.ProductID, vwap)
 }
 
 func subscribe(conn *websocket.Conn, logger Logger) error {

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"math/rand"
+	"strconv"
 	"sync"
 	"testing"
 )
@@ -9,17 +11,19 @@ import (
 func TestVWAPCalculator_EdgeCases(t *testing.T) {
 	t.Run("EmptyCalculator", func(t *testing.T) {
 		calc := NewVWAPCalculator()
-		if result := calc.Calculate(); result != 0 {
-			t.Errorf("Expected 0, got %.2f", result)
+		if result := calc.Calculate(); result != "0" {
+			t.Errorf("Expected 0, got %s", result)
 		}
 	})
 
 	t.Run("SingleTrade", func(t *testing.T) {
 		calc := NewVWAPCalculator()
-		calc.Update(100, 2)
-		expected := 100.0
+		if err := calc.Update("100", "2"); err != nil {
+			t.Errorf("Update returned error: %v", err)
+		}
+		expected := "100.0000"
 		if result := calc.Calculate(); result != expected {
-			t.Errorf("Expected %.2f, got %.2f", expected, result)
+			t.Errorf("Expected %s, got %s", expected, result)
 		}
 	})
 
@@ -31,14 +35,17 @@ func TestVWAPCalculator_EdgeCases(t *testing.T) {
 		for i := 1; i <= windowSize; i++ {
 			price := float64(i)
 			size := 1.0
-			calc.Update(price, size)
+			if err := calc.Update(fmt.Sprintf("%g", price), fmt.Sprintf("%g", size)); err != nil {
+				t.Errorf("Update returned error: %v", err)
+			}
 			totalPV += price * size
 			totalVolume += size
 		}
 
-		expected := totalPV / totalVolume
+		expectedFloat := totalPV / totalVolume
+		expected := fmt.Sprintf("%.4f", expectedFloat)
 		if result := calc.Calculate(); result != expected {
-			t.Errorf("Expected %.2f, got %.2f", expected, result)
+			t.Errorf("Expected %s, got %s", expected, result)
 		}
 	})
 
@@ -50,16 +57,18 @@ func TestVWAPCalculator_EdgeCases(t *testing.T) {
 		for i := 1; i <= windowSize+1; i++ {
 			price := float64(i)
 			size := 1.0
-			calc.Update(price, size)
-			
-			if i > 1 { // First trade will be pushed out at i=201
+			if err := calc.Update(fmt.Sprintf("%g", price), fmt.Sprintf("%g", size)); err != nil {
+				t.Errorf("Update returned error: %v", err)
+			}
+			if i > 1 {
 				expectedPV += price * size
 			}
 		}
 
-		expected := expectedPV / float64(windowSize)
+		expectedFloat := expectedPV / float64(windowSize)
+		expected := fmt.Sprintf("%.4f", expectedFloat)
 		if result := calc.Calculate(); result != expected {
-			t.Errorf("Expected %.2f, got %.2f", expected, result)
+			t.Errorf("Expected %s, got %s", expected, result)
 		}
 	})
 
@@ -74,7 +83,7 @@ func TestVWAPCalculator_EdgeCases(t *testing.T) {
 		}
 
 		for _, tc := range cases {
-			err := calc.Update(tc.price, tc.size)
+			err := calc.Update(fmt.Sprintf("%g", tc.price), fmt.Sprintf("%g", tc.size))
 			if err == nil {
 				t.Errorf("Expected error for price=%.2f size=%.2f", tc.price, tc.size)
 			}
@@ -93,18 +102,23 @@ func TestConcurrentUpdates(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < updatesPerWorker; j++ {
-				price := rand.Float64() * 1000
-				size := rand.Float64() * 10
-				calc.Update(price, size)
+				price := rand.Float64()*1000 + 0.0001
+				size := rand.Float64()*10 + 0.0001
+				if err := calc.Update(fmt.Sprintf("%g", price), fmt.Sprintf("%g", size)); err != nil {
+					t.Errorf("Update returned error: %v", err)
+				}
 			}
 		}()
 	}
 
 	wg.Wait()
-	
-	// Final calculation shouldn't panic
-	result := calc.Calculate()
+
+	resultStr := calc.Calculate()
+	result, err := strconv.ParseFloat(resultStr, 64)
+	if err != nil {
+		t.Errorf("Failed to parse VWAP result: %v", err)
+	}
 	if result < 0 {
-		t.Errorf("Invalid VWAP result: %.2f", result)
+		t.Errorf("Invalid VWAP result: %f", result)
 	}
 }
